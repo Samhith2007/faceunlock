@@ -1,0 +1,4 @@
+embeddings.json
+session.json
+__pycache__/
+*.pyc
