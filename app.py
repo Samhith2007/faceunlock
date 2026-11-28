@@ -16,10 +16,12 @@ from sklearn.datasets import fetch_lfw_people
 # CONFIGURATION
 # ==========================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-REGISTERED_IMAGE = os.path.join(BASE_DIR, "images", "registered_user.jpg")
+KNOWN_FACES_DIR = os.path.join(BASE_DIR, "images", "known_faces")
+FALLBACK_REGISTERED_IMAGE = os.path.join(BASE_DIR, "images", "registered_user.jpg")
 CAPTURED_IMAGE = os.path.join(BASE_DIR, "captured_face.jpg")
 MODEL_NAME = "Facenet512"
 COSINE_THRESHOLD = 0.45
+VALID_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp")
 
 ctk.set_appearance_mode("light")
 ctk.set_default_color_theme("blue")
@@ -44,6 +46,7 @@ class FaceIDApp:
         self.history_items = []
         self.menu_buttons = {}
         self.cards = {}
+        self.known_embeddings = {}
 
         # Smoothing buffers for face measurements
         self.w_hist = deque(maxlen=20)
@@ -66,6 +69,7 @@ class FaceIDApp:
         self.create_sidebar()
         self.create_main_area()
         self.select_menu("Dashboard")
+        self.refresh_known_faces_label()
         self.root.protocol("WM_DELETE_WINDOW", self.close_app)
 
         if self.cap.isOpened():
@@ -76,6 +80,68 @@ class FaceIDApp:
                 fg_color="#FEE2E2",
                 text_color="#DC2626",
             )
+
+    def get_dataset_images(self):
+        os.makedirs(KNOWN_FACES_DIR, exist_ok=True)
+        entries = []
+
+        for filename in sorted(os.listdir(KNOWN_FACES_DIR)):
+            if filename.lower().endswith(VALID_EXTENSIONS):
+                full_path = os.path.join(KNOWN_FACES_DIR, filename)
+                label = os.path.splitext(filename)[0].replace("_", " ").strip()
+                if label:
+                    entries.append((label, full_path))
+
+        if not entries and os.path.exists(FALLBACK_REGISTERED_IMAGE):
+            entries.append(("Authorized Profile", FALLBACK_REGISTERED_IMAGE))
+
+        return entries
+
+    def refresh_known_faces_label(self):
+        entries = self.get_dataset_images()
+        if not entries:
+            self.authorized_users_label.configure(
+                text="No images in images/known_faces/"
+            )
+        else:
+            names = ", ".join(name for name, _ in entries)
+            self.authorized_users_label.configure(
+                text=f"{len(entries)} enrolled: {names}"
+            )
+
+    def load_known_embeddings(self):
+        entries = self.get_dataset_images()
+        if not entries:
+            raise RuntimeError(
+                "No enrolled face images found.\nAdd photos to images/known_faces/ first."
+            )
+
+        loaded = {}
+        for person_name, img_path in entries:
+            mtime = os.path.getmtime(img_path)
+            cache_key = (img_path, mtime)
+            cached = self.known_embeddings.get(person_name)
+            if cached and cached["key"] == cache_key:
+                loaded[person_name] = cached
+                continue
+
+            res = DeepFace.represent(
+                img_path=img_path,
+                model_name=MODEL_NAME,
+                detector_backend="opencv",
+                enforce_detection=False,
+            )
+            if res and res[0].get("embedding"):
+                loaded[person_name] = {
+                    "key": cache_key,
+                    "embedding": res[0]["embedding"],
+                }
+
+        if not loaded:
+            raise RuntimeError("Could not extract face embeddings from dataset images.")
+
+        self.known_embeddings = loaded
+        return loaded
 
     # ======================================
     # SIDEBAR
@@ -168,7 +234,7 @@ class FaceIDApp:
         elif name == "Face Verification":
             self.header_title.configure(text="Face Verification")
             self.header_sub.configure(
-                text="Verify live face or update registered profile photo"
+                text="Verify live face against authorized dataset profiles"
             )
             self.cards["verify"].pack(fill="x", pady=(0, 12))
             self.cards["embedding"].pack(fill="x", pady=6)
@@ -262,21 +328,24 @@ class FaceIDApp:
             text="FACE VERIFICATION",
             font=("Arial", 16, "bold"),
             text_color="#172554",
-        ).pack(anchor="w", padx=18, pady=(20, 15))
+        ).pack(anchor="w", padx=18, pady=(20, 12))
 
         ctk.CTkLabel(
             verify_card,
-            text="REGISTERED USER",
+            text="AUTHORIZED DATASET PROFILES",
             font=("Arial", 11, "bold"),
             text_color="#64748B",
         ).pack(anchor="w", padx=18)
 
-        ctk.CTkLabel(
+        self.authorized_users_label = ctk.CTkLabel(
             verify_card,
-            text="Authorized Profile",
-            font=("Arial", 16, "bold"),
+            text="Checking images/known_faces/...",
+            font=("Arial", 13, "bold"),
             text_color="#1E293B",
-        ).pack(anchor="w", padx=18, pady=(5, 18))
+            wraplength=320,
+            justify="left",
+        )
+        self.authorized_users_label.pack(anchor="w", padx=18, pady=(5, 16))
 
         self.status_label = ctk.CTkLabel(
             verify_card,
@@ -300,18 +369,6 @@ class FaceIDApp:
             command=self.verify_face,
         )
         self.verify_button.pack(fill="x", padx=18, pady=10)
-
-        self.register_button = ctk.CTkButton(
-            verify_card,
-            text="UPDATE REGISTERED PHOTO",
-            height=40,
-            corner_radius=10,
-            fg_color="#EAF1FF",
-            hover_color="#D7E5FF",
-            text_color="#2563EB",
-            command=self.register_face,
-        )
-        self.register_button.pack(fill="x", padx=18, pady=(0, 10))
 
         self.lfw_button = ctk.CTkButton(
             verify_card,
@@ -496,10 +553,12 @@ class FaceIDApp:
         if self.current_frame is None:
             messagebox.showerror("Camera Error", "Camera image is not available.")
             return
-        if not os.path.exists(REGISTERED_IMAGE):
+
+        self.refresh_known_faces_label()
+        if not self.get_dataset_images():
             messagebox.showerror(
-                "Image Error",
-                "Registered image not found!\nClick UPDATE REGISTERED PHOTO first.",
+                "Dataset Error",
+                "No enrolled face images found.\nAdd photos to images/known_faces/ first.",
             )
             return
 
@@ -529,6 +588,8 @@ class FaceIDApp:
             if not saved:
                 raise RuntimeError("Could not save camera image.")
 
+            known_map = self.load_known_embeddings()
+
             live_res = DeepFace.represent(
                 img_path=CAPTURED_IMAGE,
                 model_name=MODEL_NAME,
@@ -544,20 +605,20 @@ class FaceIDApp:
                 for index, value in enumerate(live_embedding)
             )
 
-            reg_res = DeepFace.represent(
-                img_path=REGISTERED_IMAGE,
-                model_name=MODEL_NAME,
-                detector_backend="opencv",
-                enforce_detection=False,
-            )
-            reg_embedding = reg_res[0]["embedding"]
-            dist = self.cosine_distance(reg_embedding, live_embedding)
-            verified = dist <= COSINE_THRESHOLD
+            best_name = None
+            best_dist = float("inf")
+            for person_name, data in known_map.items():
+                dist = self.cosine_distance(data["embedding"], live_embedding)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_name = person_name
+
+            verified = best_dist <= COSINE_THRESHOLD
 
             self.root.after(
                 0,
-                lambda v=verified, t=embedding_text, d=dist: self.finish_verification(
-                    v, None, t, d
+                lambda v=verified, t=embedding_text, d=best_dist, n=best_name: (
+                    self.finish_verification(v, None, t, d, n)
                 ),
             )
         except Exception as error:
@@ -567,12 +628,13 @@ class FaceIDApp:
             )
 
     def finish_verification(
-        self, verified, error, embedding_text=None, dist=None
+        self, verified, error, embedding_text=None, dist=None, matched_name=None
     ):
         self.verifying = False
         if not self.running:
             return
         self.verify_button.configure(state="normal", text="VERIFY FACE")
+        self.refresh_known_faces_label()
 
         if embedding_text is not None:
             self.embedding_textbox.configure(state="normal")
@@ -591,12 +653,13 @@ class FaceIDApp:
             self.add_history("VERIFICATION ERROR")
             messagebox.showerror("Verification Error", error)
         elif verified is True:
+            user_tag = f": {matched_name}" if matched_name else ""
             self.status_label.configure(
-                text=f"ACCESS GRANTED{dist_tag}",
+                text=f"ACCESS GRANTED{user_tag}{dist_tag}",
                 fg_color="#DCFCE7",
                 text_color="#15803D",
             )
-            self.add_history(f"ACCESS GRANTED{dist_tag}")
+            self.add_history(f"GRANTED{user_tag}{dist_tag}")
         else:
             self.status_label.configure(
                 text=f"ACCESS DENIED{dist_tag}",
@@ -670,32 +733,6 @@ class FaceIDApp:
             messagebox.showerror("LFW Error", err)
         else:
             self.add_history(summary)
-
-    def register_face(self):
-        if self.verifying:
-            return
-        if self.current_frame is None:
-            messagebox.showerror("Camera Error", "Camera image is not available.")
-            return
-
-        confirm = messagebox.askyesno(
-            "Update Registered Photo",
-            "Replace the registered photo with the current camera image?",
-        )
-        if not confirm:
-            return
-
-        os.makedirs(os.path.dirname(REGISTERED_IMAGE), exist_ok=True)
-        success = cv2.imwrite(REGISTERED_IMAGE, self.current_frame.copy())
-        if success:
-            self.status_label.configure(
-                text="REGISTERED PHOTO UPDATED",
-                fg_color="#DCFCE7",
-                text_color="#15803D",
-            )
-            messagebox.showinfo("Success", "Registered photo updated successfully!")
-        else:
-            messagebox.showerror("Error", "Unable to save registered photo.")
 
     def add_history(self, result):
         current_time = datetime.now().strftime("%I:%M:%S %p")

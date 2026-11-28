@@ -1,4 +1,23 @@
-embeddings.json
-session.json
+# Temporary runtime captures & local caches
+captured_face.jpg
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+
+# Downloaded LFW dataset cache (scikit-learn)
+scikit_learn_data/
+lfw_home/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE & OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
